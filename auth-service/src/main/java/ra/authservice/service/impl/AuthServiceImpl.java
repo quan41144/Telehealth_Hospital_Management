@@ -2,6 +2,11 @@ package ra.authservice.service.impl;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.CachePut;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.cache.annotation.Caching;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -12,6 +17,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import ra.authservice.common.RoleType;
+import ra.authservice.config.RabbitMQConfig;
 import ra.authservice.dto.request.*;
 import ra.authservice.dto.response.AuthInfoResponse;
 import ra.authservice.dto.response.LoginAuthResponse;
@@ -48,6 +54,7 @@ public class AuthServiceImpl implements AuthService {
     private final RedisTemplate<String, String> redisTemplate;
     private final EmailService emailService;
     private final StringRedisTemplate stringRedisTemplate;
+    private final RabbitTemplate rabbitTemplate;
 
     @Override
     public User getValidUserById(Long userId) {
@@ -96,6 +103,7 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     @Transactional
+    @CacheEvict(value = "allAuthInfo", allEntries = true)
     public String register(RegisterAuthRequest registerAuthRequest) {
         if (userRepository.existsByUsername(registerAuthRequest.getUsername())) {
             throw new ConflictException("Tên đăng nhập " + registerAuthRequest.getUsername() + " đã tồn tại!");
@@ -167,6 +175,7 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     @Transactional
+    @CachePut(value = "authInfo", key = "#userId")
     public AuthInfoResponse updateRole(Long userId, UpdateRoleRequest updateRoleRequest) {
         User user = getValidUserById(userId);
         Set<Role> updateRoles = new HashSet<>();
@@ -189,6 +198,7 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     @Transactional
+    @CachePut(value = "authInfo", key = "#userId")
     public AuthInfoResponse updateInfoAuth(Long userId, UpdateInfoAuthRequest updateInfoAuthRequest) {
         User user = getValidUserById(userId);
         if (updateInfoAuthRequest.getEmail() != null) {
@@ -252,6 +262,7 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
+    @Cacheable(value = "allAuthInfo", key = "'all'")
     public List<AuthInfoResponse> getAllUsers() {
         List<User> users = userRepository.findAll().stream()
                 .filter(user -> !user.getDeleted())
@@ -267,6 +278,7 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
+    @Cacheable(value = "authInfo", key = "#userId")
     public AuthInfoResponse getUserById(Long userId) {
         User user = getValidUserById(userId);
         return AuthInfoResponse.builder()
@@ -279,6 +291,10 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     @Transactional
+    @Caching(evict = {
+            @CacheEvict(value = "authInfo", key = "#userId"),
+            @CacheEvict(value = "allAuthInfo", allEntries = true)
+    })
     public void deleteUserById(Long userId) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Tài khoản không tồn tại!"));
@@ -295,5 +311,11 @@ public class AuthServiceImpl implements AuthService {
         userRepository.save(user);
         refreshTokenRepository.deleteByUser(user);
         log.info("******************Xóa thành công user!*****************");
+        rabbitTemplate.convertAndSend(
+                RabbitMQConfig.USER_EXCHANGE,
+                RabbitMQConfig.USER_DELETE_ROUTING_KEY,
+                userId
+        );
+        log.info("Đã xóa User ID: {}", userId);
     }
 }
